@@ -45,6 +45,10 @@ start_time = None
 blocks_file_path = os.environ.get('BLOCKS_FILE', 'blocks.log')
 blocks_file = None
 
+# Output file for stats (default: stats.log, can be overridden with STATS_FILE env var)
+stats_file_path = os.environ.get('STATS_FILE', 'stats.log')
+stats_file = None
+
 
 # Logging setup
 logging.basicConfig(
@@ -164,8 +168,13 @@ def process_message(buffer):
 
 def analyze_missing_blocks():
     """Analyze received blocks and identify missing blocks in the sequence"""
+    global stats_file
+    
     if not received_blocks:
-        logger.info("No blocks received during this session.")
+        msg = "No blocks received during this session."
+        logger.info(msg)
+        if stats_file:
+            stats_file.write(msg + "\n")
         return
     
     sorted_blocks = sorted(received_blocks)
@@ -174,45 +183,55 @@ def analyze_missing_blocks():
     total_blocks_in_range = max_block - min_block + 1
     received_count = len(received_blocks)
     
-    logger.info("=" * 80)
-    logger.info("BLOCK ANALYSIS REPORT")
-    logger.info("=" * 80)
-    logger.info(f"Session Duration: {start_time} to {datetime.datetime.now(datetime.timezone.utc)}")
-    logger.info(f"Total Messages Processed: {processed_count}")
+    # Helper function to write to both logger and stats file
+    def write_stat(msg, level='info'):
+        if level == 'info':
+            logger.info(msg)
+        elif level == 'warning':
+            logger.warning(msg)
+        if stats_file:
+            stats_file.write(msg + "\n")
+            stats_file.flush()
+    
+    write_stat("=" * 80)
+    write_stat("BLOCK ANALYSIS REPORT")
+    write_stat("=" * 80)
+    write_stat(f"Session Duration: {start_time} to {datetime.datetime.now(datetime.timezone.utc)}")
+    write_stat(f"Total Messages Processed: {processed_count}")
     error_percentage = (decode_error_count/processed_count*100) if processed_count > 0 else 0
-    logger.info(f"Protobuf Decode Errors: {decode_error_count} ({error_percentage:.1f}% of messages)")
-    logger.info(f"Unique Blocks Received: {received_count}")
-    logger.info(f"Block Range: {min_block} to {max_block}")
-    logger.info(f"Expected Blocks in Range: {total_blocks_in_range}")
-    logger.info(f"Missing Blocks: {total_blocks_in_range - received_count}")
-    logger.info("")
+    write_stat(f"Protobuf Decode Errors: {decode_error_count} ({error_percentage:.1f}% of messages)")
+    write_stat(f"Unique Blocks Received: {received_count}")
+    write_stat(f"Block Range: {min_block} to {max_block}")
+    write_stat(f"Expected Blocks in Range: {total_blocks_in_range}")
+    write_stat(f"Missing Blocks: {total_blocks_in_range - received_count}")
+    write_stat("")
     
     # Find missing blocks
     expected_blocks = set(range(min_block, max_block + 1))
     missing_blocks = sorted(expected_blocks - received_blocks)
     
     if missing_blocks:
-        logger.warning(f"Found {len(missing_blocks)} missing block(s):")
+        write_stat(f"Found {len(missing_blocks)} missing block(s):", 'warning')
         
         # Group consecutive missing blocks for cleaner output
         if len(missing_blocks) <= 50:
             # Show all if not too many
             for block in missing_blocks:
-                logger.warning(f"  Missing Block: {block}")
+                write_stat(f"  Missing Block: {block}", 'warning')
         else:
             # Show first 20 and last 20, with summary
-            logger.warning("  First 20 missing blocks:")
+            write_stat("  First 20 missing blocks:", 'warning')
             for block in missing_blocks[:20]:
-                logger.warning(f"    {block}")
-            logger.warning(f"  ... ({len(missing_blocks) - 40} more blocks) ...")
-            logger.warning("  Last 20 missing blocks:")
+                write_stat(f"    {block}", 'warning')
+            write_stat(f"  ... ({len(missing_blocks) - 40} more blocks) ...", 'warning')
+            write_stat("  Last 20 missing blocks:", 'warning')
             for block in missing_blocks[-20:]:
-                logger.warning(f"    {block}")
+                write_stat(f"    {block}", 'warning')
         
         # Find consecutive ranges of missing blocks
         if len(missing_blocks) > 1:
-            logger.info("")
-            logger.info("Missing Block Ranges:")
+            write_stat("")
+            write_stat("Missing Block Ranges:")
             ranges = []
             start = missing_blocks[0]
             end = missing_blocks[0]
@@ -234,11 +253,11 @@ def analyze_missing_blocks():
             else:
                 ranges.append(f"{start}-{end}")
             
-            logger.info(f"  {', '.join(ranges)}")
+            write_stat(f"  {', '.join(ranges)}")
     else:
-        logger.info("✓ No missing blocks detected! All blocks in the range were received.")
+        write_stat("✓ No missing blocks detected! All blocks in the range were received.")
     
-    logger.info("=" * 80)
+    write_stat("=" * 80)
 
 def signal_handler(signum, frame):
     """Handle shutdown signals gracefully"""
@@ -248,7 +267,7 @@ def signal_handler(signum, frame):
 # --- Main execution --- #
 
 def main():
-    global processed_count, blocks_file
+    global processed_count, blocks_file, stats_file
     # Set up signal handlers for graceful shutdown
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
@@ -261,6 +280,15 @@ def main():
         logger.error(f"Failed to open blocks file {blocks_file_path}: {e}")
         logger.info("Blocks will not be logged to file")
         blocks_file = None
+    
+    # Open stats output file
+    try:
+        stats_file = open(stats_file_path, 'w')  # Write mode (overwrite)
+        logger.info(f"Writing stats to: {stats_file_path}")
+    except Exception as e:
+        logger.error(f"Failed to open stats file {stats_file_path}: {e}")
+        logger.info("Stats will not be logged to file")
+        stats_file = None
     
     # Main thread: Kafka polling loop
     try:
@@ -297,6 +325,11 @@ def main():
         if blocks_file:
             blocks_file.close()
             logger.info(f"Blocks log saved to: {blocks_file_path}")
+
+        # Close stats file
+        if stats_file:
+            stats_file.close()
+            logger.info(f"Stats report saved to: {stats_file_path}")
 
         # Close Kafka consumer
         consumer.close()
